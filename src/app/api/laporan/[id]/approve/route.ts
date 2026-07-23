@@ -1,0 +1,89 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { executeQuery, getDbPool } from '@/lib/db';
+import { PENDING_STATUSES, APPROVED_STATUSES } from '@/lib/status';
+import { getUserSession } from '@/lib/auth';
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id: laporanId } = await params;
+    const body = await req.json();
+
+    if (!laporanId || isNaN(Number(laporanId))) {
+      return NextResponse.json(
+        { success: false, message: 'Invalid laporan ID' },
+        { status: 400 }
+      );
+    }
+
+    // Get feedback from request body
+    const { feedback } = body;
+
+    if (!feedback || feedback.trim() === '') {
+      return NextResponse.json(
+        { success: false, message: 'Feedback wajib diisi' },
+        { status: 400 }
+      );
+    }
+
+    // Get current user from session
+    const currentUser = await getUserSession();
+    
+    if (!currentUser) {
+      return NextResponse.json(
+        { success: false, message: 'Unauthorized - Please login first' },
+        { status: 401 }
+      );
+    }
+    
+    const approvedBy = currentUser.username;
+
+    // Update laporan status to Approved (StatusId = 5) with feedback
+    const updateQuery = `
+      UPDATE Teknik_TVRI.dbo.LaporanHarian
+      SET 
+        StatusId = 5,
+        ApproveBy = @ApproveBy,
+        ApproveDate = GETDATE(),
+        Feedback = @Feedback
+      WHERE Id = @LaporanId
+      AND StatusId IN (2, 3, 4) -- Only approve if currently pending, review, or revision
+    `;
+
+    // For UPDATE queries, we need to use a different approach since executeQuery returns empty array for UPDATE
+    // We'll check rowsAffected instead
+    const pool = await getDbPool();
+    const request = pool.request();
+    
+    request.input('LaporanId', Number(laporanId));
+    request.input('ApproveBy', approvedBy);
+    request.input('Feedback', feedback.trim());
+    
+    const result = await request.query(updateQuery);
+    
+    // Check if any row was affected using rowsAffected
+    if (!result || (result.rowsAffected && result.rowsAffected[0] === 0)) {
+      return NextResponse.json(
+        { success: false, message: 'Laporan tidak ditemukan atau status tidak valid untuk approve. Status harus Pending, Review, atau Revision.' },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: 'Laporan berhasil di-approve'
+    });
+
+  } catch (error) {
+    console.error('Error approving laporan:', error);
+    return NextResponse.json(
+      {
+        success: false,
+        message: 'Terjadi kesalahan saat approve laporan'
+      },
+      { status: 500 }
+    );
+  }
+}
